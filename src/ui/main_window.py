@@ -15,6 +15,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Game Tracker")
         self.setMinimumSize(800, 600)
+        self.showMaximized()
         
         # Initialize database
         self.db = DatabaseManager()

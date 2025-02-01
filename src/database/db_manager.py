@@ -224,3 +224,134 @@ class DatabaseManager:
             }
             results.append(game)
         return results
+
+    def get_current_streak(self):
+        """Calculate current streak of consecutive days with completed games"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            WITH RECURSIVE dates AS (
+                SELECT date('now', 'localtime') as date
+                UNION ALL
+                SELECT date(date, '-1 day')
+                FROM dates
+                WHERE EXISTS (
+                    SELECT 1 FROM progress 
+                    WHERE date = date(date, '-1 day')
+                    AND completed = 1
+                )
+            )
+            SELECT COUNT(*) FROM dates
+        """)
+        return cursor.fetchone()[0]
+
+    def get_longest_streak(self):
+        """Calculate longest streak of consecutive days with completed games"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            WITH consecutive_days AS (
+                SELECT date,
+                       date(date, 
+                            '-' || ROW_NUMBER() OVER (ORDER BY date) || ' days'
+                       ) as grp
+                FROM progress
+                WHERE completed = 1
+                GROUP BY date
+            )
+            SELECT COUNT(*) as streak_length
+            FROM consecutive_days
+            GROUP BY grp
+            ORDER BY streak_length DESC
+            LIMIT 1
+        """)
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
+    def get_game_stats(self, game_id=None):
+        """Get statistics for a specific game or all games"""
+        cursor = self.conn.cursor()
+        
+        if game_id:
+            cursor.execute("""
+                SELECT g.name, g.score_type,
+                       COUNT(CASE WHEN p.completed = 1 THEN 1 END) as times_completed,
+                       COUNT(p.score) as times_scored,
+                       AVG(CASE WHEN p.score GLOB '*[0-9]*' AND p.score NOT GLOB '*[A-Za-z]*' 
+                               THEN CAST(p.score AS INTEGER) END) as avg_score,
+                       MAX(CASE WHEN p.score GLOB '*[0-9]*' AND p.score NOT GLOB '*[A-Za-z]*' 
+                               THEN CAST(p.score AS INTEGER) END) as best_score,
+                       (SELECT date 
+                        FROM progress 
+                        WHERE game_id = g.id 
+                        AND score = (SELECT MAX(score) FROM progress WHERE game_id = g.id)
+                        LIMIT 1) as best_score_date
+                FROM games g
+                LEFT JOIN progress p ON g.id = p.game_id
+                WHERE g.id = ?
+                GROUP BY g.id
+            """, (game_id,))
+        else:
+            cursor.execute("""
+                SELECT g.id, g.name, g.score_type,
+                       COUNT(CASE WHEN p.completed = 1 THEN 1 END) as times_completed,
+                       COUNT(p.score) as times_scored,
+                       AVG(CASE WHEN p.score GLOB '*[0-9]*' AND p.score NOT GLOB '*[A-Za-z]*' 
+                               THEN CAST(p.score AS INTEGER) END) as avg_score,
+                       MAX(CASE WHEN p.score GLOB '*[0-9]*' AND p.score NOT GLOB '*[A-Za-z]*' 
+                               THEN CAST(p.score AS INTEGER) END) as best_score,
+                       (SELECT date 
+                        FROM progress 
+                        WHERE game_id = g.id 
+                        AND score = (SELECT MAX(score) FROM progress WHERE game_id = g.id)
+                        LIMIT 1) as best_score_date
+                FROM games g
+                LEFT JOIN progress p ON g.id = p.game_id
+                GROUP BY g.id
+            """)
+        
+        return cursor.fetchall()
+
+
+    def get_monthly_scores(self, game_id, year, month):
+        """Get daily scores for a game in the specified month"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT date, score
+            FROM progress
+            WHERE game_id = ? 
+            AND strftime('%Y-%m', date) = ?
+            AND score IS NOT NULL
+            AND score GLOB '*[0-9]*' 
+            AND score NOT GLOB '*[A-Za-z]*'
+            ORDER BY date
+        """, (game_id, f"{year}-{month:02d}"))
+        return cursor.fetchall()
+
+    def get_completion_percentage(self, game_id):
+        """Get completion percentage for days where any game was played"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            WITH active_days AS (
+                SELECT DISTINCT date
+                FROM progress
+                WHERE completed = 1
+            )
+            SELECT 
+                COUNT(CASE WHEN p.completed = 1 THEN 1 END) as completed_count,
+                COUNT(p.date) as total_count
+            FROM active_days ad
+            LEFT JOIN progress p ON p.date = ad.date
+            WHERE p.game_id = ?
+        """, (game_id,))
+        return cursor.fetchone()
+
+    def get_game_history(self, game_id):
+        """Get all completed entries for a game"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT date, completed, score, note
+            FROM progress
+            WHERE game_id = ?
+            AND completed = 1
+            ORDER BY date DESC
+        """, (game_id,))
+        return cursor.fetchall()

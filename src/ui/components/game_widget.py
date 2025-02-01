@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
     QLineEdit, QFrame, QPushButton, QTextEdit, QDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtGui import QMouseEvent, QDesktopServices
 import webbrowser
 
 class NoteDialog(QDialog):
@@ -235,12 +235,15 @@ class GameWidget(QWidget):
         if self.mode == "calendar":
             # Do nothing in calendar mode
             return
-            
+                
         # Only handle URL clicks in daily mode
         if event.button() == Qt.MouseButton.LeftButton:
             # Handle differently based on if game is dict or object
             url = self.game.get('url') if isinstance(self.game, dict) else self.game.url
             if url:
+                # Add http:// prefix if no protocol is specified
+                if not url.startswith(('http://', 'https://')):
+                    url = 'https://' + url
                 QDesktopServices.openUrl(QUrl(url))
 
     def checkbox_clicked(self, event):
