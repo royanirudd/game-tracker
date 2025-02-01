@@ -1,0 +1,22 @@
+# Python bytecode files
+*.pyc
+*.pyo
+__pycache__/
+
+# Virtual environment
+venv/
+env/
+
+# Windows-specific files
+Thumbs.db
+
+# Python distribution/packaging
+build/
+dist/
+*.egg-info/
+
+*.log
+
+*.sqlite
+*.db
+
