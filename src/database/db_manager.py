@@ -1,134 +1,162 @@
 import sqlite3
-from datetime import datetime
-from typing import List, Optional
-from pathlib import Path
+from datetime import datetime, date
 from models.game import Game
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "game_tracker.db"):
-        self.db_path = db_path
-        self.init_database()
+    def __init__(self):
+        self.conn = sqlite3.connect('game_tracker.db')
+        self.conn.row_factory = sqlite3.Row
+        self.current_version = 2  # Increment this when schema changes
+        self.create_tables()
+        self.migrate_database()
 
-    def init_database(self):
-        """Initialize the database and create necessary tables."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        # Create games table
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        
+        # Version tracking table
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS games (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            description TEXT,
-            score_type TEXT NOT NULL,
-            reminder_time TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY
+            )
         ''')
-
-        # Create daily_progress table
+        
+        # Games table
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_progress (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            game_id INTEGER,
-            date DATE NOT NULL,
-            completed BOOLEAN DEFAULT FALSE,
-            score TEXT,
-            notes TEXT,
-            FOREIGN KEY (game_id) REFERENCES games (id),
-            UNIQUE (game_id, date)
-        )
+            CREATE TABLE IF NOT EXISTS games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                url TEXT,
+                description TEXT,
+                score_type TEXT,
+                reminder_time TEXT,
+                created_at TIMESTAMP
+            )
         ''')
-
-        conn.commit()
-        conn.close()
-
-    def add_game(self, game: Game) -> int:
-        """Add a new game to the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
         
+        # Progress table
         cursor.execute('''
-        INSERT INTO games (name, url, description, score_type, reminder_time, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (game.name, game.url, game.description, game.score_type, 
-              game.reminder_time, game.created_at))
+            CREATE TABLE IF NOT EXISTS progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER,
+                date DATE,
+                completed BOOLEAN DEFAULT 0,
+                score TEXT,
+                note TEXT,
+                FOREIGN KEY (game_id) REFERENCES games (id),
+                UNIQUE(game_id, date)
+            )
+        ''')
         
-        game_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return game_id
+        self.conn.commit()
 
-    def get_all_games(self) -> List[Game]:
-        """Retrieve all games from the database."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM games')
-        rows = cursor.fetchall()
-        
-        games = []
-        for row in cursor.fetchall():
-            games.append(Game(
-                id=row[0],
-                name=row[1],
-                url=row[2],
-                description=row[3],
-                score_type=row[4],
-                reminder_time=row[5],
-                created_at=datetime.fromisoformat(row[6])
-            ))
-        
-        conn.close()
-        return games
+    def get_db_version(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
+        result = cursor.fetchone()
+        return result[0] if result else 0
 
-    def update_game_progress(self, game_id: int, date: datetime.date, 
-                           completed: bool, score: Optional[str] = None, 
-                           notes: Optional[str] = None):
-        """Update or create a daily progress entry for a game."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    def migrate_database(self):
+        current_version = self.get_db_version()
         
+        if current_version < self.current_version:
+            cursor = self.conn.cursor()
+            
+            # Migrations
+            if current_version < 2:
+                # Migrate to version 2: Add note column
+                cursor.execute('''
+                    CREATE TABLE progress_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        game_id INTEGER,
+                        date DATE,
+                        completed BOOLEAN DEFAULT 0,
+                        score TEXT,
+                        note TEXT,
+                        FOREIGN KEY (game_id) REFERENCES games (id),
+                        UNIQUE(game_id, date)
+                    )
+                ''')
+                
+                # Copy existing data
+                cursor.execute('''
+                    INSERT INTO progress_new (id, game_id, date, completed, score)
+                    SELECT id, game_id, date, completed, score FROM progress
+                ''')
+                
+                # Drop old table and rename new one
+                cursor.execute('DROP TABLE progress')
+                cursor.execute('ALTER TABLE progress_new RENAME TO progress')
+            
+            # Update schema version
+            cursor.execute('DELETE FROM schema_version')
+            cursor.execute('INSERT INTO schema_version (version) VALUES (?)', 
+                         (self.current_version,))
+            
+            self.conn.commit()
+
+    def get_daily_progress(self, target_date):
+        cursor = self.conn.cursor()
         cursor.execute('''
-        INSERT INTO daily_progress (game_id, date, completed, score, notes)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (game_id, date) DO UPDATE SET
-            completed = excluded.completed,
-            score = excluded.score,
-            notes = excluded.notes
-        ''', (game_id, date.isoformat(), completed, score, notes))
-        
-        conn.commit()
-        conn.close()
-
-    def get_daily_progress(self, date: datetime.date) -> List[dict]:
-        """Get progress for all games for a specific date."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT g.*, dp.completed, dp.score, dp.notes
-        FROM games g
-        LEFT JOIN daily_progress dp ON g.id = dp.game_id AND dp.date = ?
-        ''', (date.isoformat(),))
+            SELECT 
+                g.*,
+                p.completed,
+                p.score,
+                p.note
+            FROM games g
+            LEFT JOIN progress p ON g.id = p.game_id 
+            AND p.date = ?
+        ''', (target_date,))
         
         results = []
         for row in cursor.fetchall():
+            row_dict = dict(row)
+            game = Game(
+                id=row_dict['id'],
+                name=row_dict['name'],
+                url=row_dict['url'],
+                description=row_dict['description'],
+                score_type=row_dict['score_type'],
+                reminder_time=row_dict['reminder_time'],
+                created_at=row_dict['created_at']
+            )
             results.append({
-                'game': Game(
-                    id=row[0],
-                    name=row[1],
-                    url=row[2],
-                    description=row[3],
-                    score_type=row[4],
-                    reminder_time=row[5],
-                    created_at=datetime.fromisoformat(row[6])
-                ),
-                'completed': bool(row[7]) if row[7] is not None else False,
-                'score': row[8],
-                'notes': row[9]
+                'game': game,
+                'completed': bool(row_dict['completed']),
+                'score': row_dict['score'],
+                'note': row_dict['note']
             })
-        
-        conn.close()
         return results
+
+    def update_game_progress(self, game_id, date, completed, score=None, note=None):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO progress (game_id, date, completed, score, note)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(game_id, date) 
+            DO UPDATE SET completed = ?, score = ?, note = ?
+        ''', (game_id, date, completed, score, note, completed, score, note))
+        self.conn.commit()
+
+    def add_game(self, game):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO games (name, url, description, score_type, reminder_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            game.name, game.url, game.description, 
+            game.score_type, game.reminder_time, game.created_at
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_all_games(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM games')
+        return [Game(**dict(row)) for row in cursor.fetchall()]
+
+
+    def delete_game(self, game_id):
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM progress WHERE game_id = ?', (game_id,))
+        cursor.execute('DELETE FROM games WHERE id = ?', (game_id,))
+        self.conn.commit()
